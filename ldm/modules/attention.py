@@ -90,7 +90,7 @@ def Normalize(in_channels):
     return torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
 
 
-# 针对图的自注意力机制，重点是输入和输出是一样的。
+# 通道注意力
 # dim --> kqv: hidden_dim * 3 --> hidden_dim  --->  dim
 class LinearAttention(nn.Module):
     def __init__(self, dim, heads=4, dim_head=32):
@@ -115,6 +115,7 @@ class LinearAttention(nn.Module):
         return self.to_out(out)
 
 
+# 空间注意力机制
 class SpatialSelfAttention(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
@@ -168,6 +169,9 @@ class SpatialSelfAttention(nn.Module):
         return x+h_
 
 
+# 交叉注意力
+# query_dim 的输出还是 query_dim
+# k和v来自context
 class CrossAttention(nn.Module):
     def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.):
         super().__init__()
@@ -194,6 +198,7 @@ class CrossAttention(nn.Module):
         k = self.to_k(context)
         v = self.to_v(context)
 
+        # h heads 头数    d dim_head
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
         sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
@@ -215,16 +220,19 @@ class CrossAttention(nn.Module):
 class BasicTransformerBlock(nn.Module):
     def __init__(self, dim, n_heads, d_head, dropout=0., context_dim=None, gated_ff=True, checkpoint=True):
         super().__init__()
-        self.attn1 = CrossAttention(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout)  # is a self-attention
+        self.attn1 = CrossAttention(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout)  
+        # is a self-attention
         self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
         self.attn2 = CrossAttention(query_dim=dim, context_dim=context_dim,
-                                    heads=n_heads, dim_head=d_head, dropout=dropout)  # is self-attn if context is none
+                                    heads=n_heads, dim_head=d_head, dropout=dropout)  
+        # is self-attn if context is none
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
 
     def forward(self, x, context=None):
+        # checkpoint 需要时重新计算
         return checkpoint(self._forward, (x, context), self.parameters(), self.checkpoint)
 
     def _forward(self, x, context=None):
@@ -234,6 +242,8 @@ class BasicTransformerBlock(nn.Module):
         return x
 
 
+# 空间transformer
+# 将每个通道作为对应(h,w)像素的dim
 class SpatialTransformer(nn.Module):
     """
     Transformer block for image-like data.
