@@ -8,24 +8,29 @@ from einops import rearrange, repeat
 from ldm.modules.diffusionmodules.util import checkpoint
 
 
+# 非None
 def exists(val):
     return val is not None
 
 
+# 去重
 def uniq(arr):
     return{el: True for el in arr}.keys()
 
-
+# 是None赋值
 def default(val, d):
     if exists(val):
         return val
     return d() if isfunction(d) else d
 
 
+# 返回该张量数据类型（dtype）所能表示的最大负数
 def max_neg_value(t):
     return -torch.finfo(t.dtype).max
 
 
+# 该函数首先计算张量最后一个维度（dim）的平方根的倒数（std）
+# 然后使用此范围的均匀分布在负和正的标准范围内填充张量。
 def init_(tensor):
     dim = tensor.shape[-1]
     std = 1 / math.sqrt(dim)
@@ -34,6 +39,7 @@ def init_(tensor):
 
 
 # feedforward
+# 带有门控的gelu激活函数
 class GEGLU(nn.Module):
     def __init__(self, dim_in, dim_out):
         super().__init__()
@@ -44,6 +50,10 @@ class GEGLU(nn.Module):
         return x * F.gelu(gate)
 
 
+# 2层的前馈神经网络
+# 第1层Linear+GELU，或者是一个GEGLU
+# 中间有个dropout
+# 第2层是Linear，输出是dim_out(不设置默认是输入的dim)
 class FeedForward(nn.Module):
     def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0.):
         super().__init__()
@@ -64,6 +74,7 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
+# 归零模块
 def zero_module(module):
     """
     Zero out the parameters of a module and return it.
@@ -73,10 +84,14 @@ def zero_module(module):
     return module
 
 
+# 组归一化
+# eps的作用就是确保在计算标准差时分母不会太小，从而保持数值稳定性。
 def Normalize(in_channels):
     return torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
 
 
+# 针对图的自注意力机制，重点是输入和输出是一样的。
+# dim --> kqv: hidden_dim * 3 --> hidden_dim  --->  dim
 class LinearAttention(nn.Module):
     def __init__(self, dim, heads=4, dim_head=32):
         super().__init__()
@@ -89,6 +104,10 @@ class LinearAttention(nn.Module):
         b, c, h, w = x.shape
         qkv = self.to_qkv(x)
         q, k, v = rearrange(qkv, 'b (qkv heads c) h w -> qkv b heads c (h w)', heads = self.heads, qkv=3)
+        # 这里的rearrange操作将原始张量重整为一个形状为
+        #          (qkv, batch_size, heads, channels, height * width)的张量。
+        # 具体来说，它将原始张量分解为查询、键和值三部分，
+        # 每部分分别具有(batch_size, heads, channels, height * width)的形状。
         k = k.softmax(dim=-1)  
         context = torch.einsum('bhdn,bhen->bhde', k, v)
         out = torch.einsum('bhde,bhdn->bhen', context, q)
