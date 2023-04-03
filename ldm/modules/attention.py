@@ -81,6 +81,7 @@ def zero_module(module):
     """
     for p in module.parameters():
         p.detach().zero_()
+    # 这里返回的还是module，不是p
     return module
 
 
@@ -217,6 +218,7 @@ class CrossAttention(nn.Module):
         return self.to_out(out)
 
 
+# 有context等价于decode结构
 class BasicTransformerBlock(nn.Module):
     def __init__(self, dim, n_heads, d_head, dropout=0., context_dim=None, gated_ff=True, checkpoint=True):
         super().__init__()

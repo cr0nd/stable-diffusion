@@ -156,6 +156,7 @@ class FrozenCLIPEmbedder(AbstractEncoder):
         outputs = self.transformer(input_ids=tokens)
 
         z = outputs.last_hidden_state
+        # last_hidden_state 的形状为：(batch_size, sequence_length, hidden_size)
         return z
 
     def encode(self, text):

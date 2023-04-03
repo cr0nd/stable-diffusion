@@ -29,6 +29,9 @@ def convert_module_to_f32(x):
 
 
 ## go
+## embed_dim 等价于输入的通道数
+## 利用注意力机制来进行池化操作
+## 输出是 (batch, embed_dim ,h,w)  -->   x[:, output_dim or embed_dim, 0]
 class AttentionPool2d(nn.Module):
     """
     Adapted from CLIP: https://github.com/openai/CLIP/blob/main/clip/model.py
@@ -53,7 +56,9 @@ class AttentionPool2d(nn.Module):
         x = x.reshape(b, c, -1)  # NC(HW)
         x = th.cat([x.mean(dim=-1, keepdim=True), x], dim=-1)  # NC(HW+1)
         x = x + self.positional_embedding[None, :, :].to(x.dtype)  # NC(HW+1)
+        # None添加一个Batch维度，然后张量扩张
         x = self.qkv_proj(x)
+        # embed_dim 投影成 3 * embed_dim
         x = self.attention(x)
         x = self.c_proj(x)
         return x[:, :, 0]
@@ -88,6 +93,10 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
         return x
 
 
+# mode="nearest"表示使用最近邻插值方法进行上采样。
+# 最近邻插值是一种简单的插值方法，通过复制最近的像素值来填充新增的像素。
+# 上采样 channels, use_conv, dims=2, out_channels=None
+# 使用nearest进行上采样，如果用了use_conv，上采样之后进行一次卷积。
 class Upsample(nn.Module):
     """
     An upsampling layer with an optional convolution.
@@ -112,12 +121,16 @@ class Upsample(nn.Module):
             x = F.interpolate(
                 x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest"
             )
+            # F.interpolate的输入是
+            # mini-batch x channels x [optional depth] x [optional height] x width
         else:
             x = F.interpolate(x, scale_factor=2, mode="nearest")
         if self.use_conv:
             x = self.conv(x)
         return x
 
+
+# 转置卷积直接上采样，放大2倍
 class TransposedUpsample(nn.Module):
     'Learned 2x upsampling without padding'
     def __init__(self, channels, out_channels=None, ks=5):
@@ -131,6 +144,9 @@ class TransposedUpsample(nn.Module):
         return self.up(x)
 
 
+# 下采样
+# 可以用平均池化来进行下采样
+# 也可以用可学习的卷积核来下采样
 class Downsample(nn.Module):
     """
     A downsampling layer with an optional convolution.
@@ -160,6 +176,10 @@ class Downsample(nn.Module):
         return self.op(x)
 
 
+# 输入： x 是一个具有 [N, C, ...] 形状的张量
+# 输入： emb 是一个具有 [N, emb_channels] 形状的张量，其中 emb_channels 是时间步嵌入通道的数量。
+# 输出： 输出形状为 [N, C_out, ...] 的张量，其中 C_out 是输出通道数。
+#        如果没有显式指定 out_channels 参数，输出通道数将与输入通道数相同。
 class ResBlock(TimestepBlock):
     """
     A residual block that can optionally change the number of channels.
@@ -215,6 +235,10 @@ class ResBlock(TimestepBlock):
         else:
             self.h_upd = self.x_upd = nn.Identity()
 
+        # 如果use_scale_shift_norm
+        # 特征图 h -->    h * (1+scale) + shift
+        # 如果不使用use_scale_shift_norm
+        # 特征图 h -->    h + shift
         self.emb_layers = nn.Sequential(
             nn.SiLU(),
             linear(
@@ -222,6 +246,7 @@ class ResBlock(TimestepBlock):
                 2 * self.out_channels if use_scale_shift_norm else self.out_channels,
             ),
         )
+        # out_layers层 = normalization + SiLU + Dropout + 初始为0的strike=3的卷积不变卷积
         self.out_layers = nn.Sequential(
             normalization(self.out_channels),
             nn.SiLU(),
@@ -230,7 +255,9 @@ class ResBlock(TimestepBlock):
                 conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1)
             ),
         )
-
+        # skip_connection的样子
+        # 输入输出相等，直连
+        # 不等：用3x3卷积 或者 1x1卷积
         if self.out_channels == channels:
             self.skip_connection = nn.Identity()
         elif use_conv:
@@ -256,12 +283,17 @@ class ResBlock(TimestepBlock):
         if self.updown:
             in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
             h = in_rest(x)
+            # 单纯插值上采样
             h = self.h_upd(h)
             x = self.x_upd(x)
             h = in_conv(h)
+            # 存在一个残差连接
+            # h = in_conv(self.h_upd(nn.SiLU(normalization(x))))
+            # x = self.x_upd(x)
         else:
             h = self.in_layers(x)
         emb_out = self.emb_layers(emb).type(h.dtype)
+        # 对齐维度
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
         if self.use_scale_shift_norm:
@@ -273,6 +305,7 @@ class ResBlock(TimestepBlock):
             h = h + emb_out
             h = self.out_layers(h)
         return self.skip_connection(x) + h
+
 
 
 class AttentionBlock(nn.Module):

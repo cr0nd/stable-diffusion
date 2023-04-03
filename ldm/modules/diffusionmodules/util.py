@@ -18,6 +18,8 @@ from einops import repeat
 from ldm.util import instantiate_from_config
 
 
+# 返回beta序列
+# 如果是linear，就是从1e-4逐步上升到2e-2
 def make_beta_schedule(schedule, n_timestep, linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
     if schedule == "linear":
         betas = (
@@ -43,6 +45,7 @@ def make_beta_schedule(schedule, n_timestep, linear_start=1e-4, linear_end=2e-2,
     return betas.numpy()
 
 
+# ddim策略的timesteps
 def make_ddim_timesteps(ddim_discr_method, num_ddim_timesteps, num_ddpm_timesteps, verbose=True):
     if ddim_discr_method == 'uniform':
         c = num_ddpm_timesteps // num_ddim_timesteps
@@ -60,6 +63,7 @@ def make_ddim_timesteps(ddim_discr_method, num_ddim_timesteps, num_ddpm_timestep
     return steps_out
 
 
+# ddim方法的sigmas, alphas, alphas_prev
 def make_ddim_sampling_parameters(alphacums, ddim_timesteps, eta, verbose=True):
     # select alphas for computing the variance schedule
     alphas = alphacums[ddim_timesteps]
@@ -148,6 +152,7 @@ class CheckpointFunction(torch.autograd.Function):
         return (None, None) + input_grads
 
 
+# 根据正弦余弦将timesteps变成[N x dim]的编码
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
     """
     Create sinusoidal timestep embeddings.
@@ -180,6 +185,7 @@ def zero_module(module):
     return module
 
 
+# 所有参数的值缩放scale倍
 def scale_module(module, scale):
     """
     Scale the parameters of a module and return it.
@@ -189,6 +195,7 @@ def scale_module(module, scale):
     return module
 
 
+# 在单个batch上求平均 [B, H, W, C] 则新张量的形状将是 [B]
 def mean_flat(tensor):
     """
     Take the mean over all non-batch dimensions.
@@ -196,6 +203,7 @@ def mean_flat(tensor):
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
 
+# GroupNorm32
 def normalization(channels):
     """
     Make a standard normalization layer.
@@ -215,6 +223,8 @@ class GroupNorm32(nn.GroupNorm):
     def forward(self, x):
         return super().forward(x.float()).type(x.dtype)
 
+
+# n维卷积层
 def conv_nd(dims, *args, **kwargs):
     """
     Create a 1D, 2D, or 3D convolution module.
@@ -228,6 +238,7 @@ def conv_nd(dims, *args, **kwargs):
     raise ValueError(f"unsupported dimensions: {dims}")
 
 
+# 线性层
 def linear(*args, **kwargs):
     """
     Create a linear module.
@@ -235,6 +246,8 @@ def linear(*args, **kwargs):
     return nn.Linear(*args, **kwargs)
 
 
+# n维的平均池化层
+# 对一个窗口大小内的内容进行池化操作
 def avg_pool_nd(dims, *args, **kwargs):
     """
     Create a 1D, 2D, or 3D average pooling module.
@@ -248,6 +261,7 @@ def avg_pool_nd(dims, *args, **kwargs):
     raise ValueError(f"unsupported dimensions: {dims}")
 
 
+# 
 class HybridConditioner(nn.Module):
 
     def __init__(self, c_concat_config, c_crossattn_config):
@@ -261,6 +275,7 @@ class HybridConditioner(nn.Module):
         return {'c_concat': [c_concat], 'c_crossattn': [c_crossattn]}
 
 
+# 
 def noise_like(shape, device, repeat=False):
     repeat_noise = lambda: torch.randn((1, *shape[1:]), device=device).repeat(shape[0], *((1,) * (len(shape) - 1)))
     noise = lambda: torch.randn(shape, device=device)

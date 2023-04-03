@@ -37,6 +37,7 @@ def disabled_train(self, mode=True):
     return self
 
 
+# 将生成的随机张量缩放到 (r1, r2) 区间
 def uniform_on_device(r1, r2, shape, device):
     return (r1 - r2) * torch.rand(*shape, device=device) + r2
 
