@@ -178,6 +178,7 @@ class Downsample(nn.Module):
 
 # 输入： x 是一个具有 [N, C, ...] 形状的张量
 # 输入： emb 是一个具有 [N, emb_channels] 形状的张量，其中 emb_channels 是时间步嵌入通道的数量。
+#   中间会将emb的维度变成x的维度，然后加到隐藏层h上面，最后裹一层再输出outchannel
 # 输出： 输出形状为 [N, C_out, ...] 的张量，其中 C_out 是输出通道数。
 #        如果没有显式指定 out_channels 参数，输出通道数将与输入通道数相同。
 class ResBlock(TimestepBlock):
@@ -307,7 +308,9 @@ class ResBlock(TimestepBlock):
         return self.skip_connection(x) + h
 
 
-
+# 带残差连接的attention块
+# 用的是空间注意力机制
+# 并且是自注意力
 class AttentionBlock(nn.Module):
     """
     An attention block that allows spatial positions to attend to each other.
@@ -357,6 +360,7 @@ class AttentionBlock(nn.Module):
         return (x + h).reshape(b, c, *spatial)
 
 
+# 计算attention操作的浮点数
 def count_flops_attn(model, _x, y):
     """
     A counter for the `thop` package to count the operations in an
@@ -400,6 +404,7 @@ class QKVAttentionLegacy(nn.Module):
         weight = th.einsum(
             "bct,bcs->bts", q * scale, k * scale
         )  # More stable with f16 than dividing afterwards
+        # 每个像素的所有channel是它的dim
         weight = th.softmax(weight.float(), dim=-1).type(weight.dtype)
         a = th.einsum("bts,bcs->bct", weight, v)
         return a.reshape(bs, -1, length)
@@ -504,6 +509,7 @@ class UNetModel(nn.Module):
         if use_spatial_transformer:
             assert context_dim is not None, 'Fool!! You forgot to include the dimension of your cross-attention conditioning...'
 
+        # context_dim = 768
         if context_dim is not None:
             assert use_spatial_transformer, 'Fool!! You forgot to use the spatial transformer for your cross-attention conditioning...'
             from omegaconf.listconfig import ListConfig
@@ -532,11 +538,14 @@ class UNetModel(nn.Module):
         self.use_checkpoint = use_checkpoint
         self.dtype = th.float16 if use_fp16 else th.float32
         self.num_heads = num_heads
+        # 都指指定了num_heads，因此num_head_channels由计算得出
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
         self.predict_codebook_ids = n_embed is not None
 
         time_embed_dim = model_channels * 4
+        # model_channels =  320
+        # time_embed_dim =  320 * 4
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
             nn.SiLU(),
@@ -545,7 +554,11 @@ class UNetModel(nn.Module):
 
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
+        # num_classes ----> time_embed_dim
 
+        # 将时间步嵌入（timestep embeddings）作为额外输入传递给子模块
+        # input_blocks定义模块
+        # in_channels = 4 直接变成 model_channels = 320
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
@@ -555,9 +568,15 @@ class UNetModel(nn.Module):
         )
         self._feature_size = model_channels
         input_block_chans = [model_channels]
+        # input_block_chans 的size是 [ model_channels + (channel_mult x (num_res_blocks+1) - 1)]
+        # 刚好也等于 [ channel_mult x (num_res_blocks+1) ]
         ch = model_channels
+        # ch = channel
+        # ds = downsample
         ds = 1
+        # channel_mult: [ 1, 2, 4, 4 ]
         for level, mult in enumerate(channel_mult):
+            # 每次间隔2个res_blocks，然后down
             for _ in range(num_res_blocks):
                 layers = [
                     ResBlock(
@@ -571,15 +590,20 @@ class UNetModel(nn.Module):
                     )
                 ]
                 ch = mult * model_channels
+                # attention_resolutions = [4 , 2 , 1]
                 if ds in attention_resolutions:
                     if num_head_channels == -1:
                         dim_head = ch // num_heads
                     else:
                         num_heads = ch // num_head_channels
                         dim_head = num_head_channels
+                    # legacy = False
                     if legacy:
                         #num_heads = 1
                         dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
+                    # use_spatial_transformer = True
+                    # context_dim = 768
+                    # 这里引入的控制生成的注意力
                     layers.append(
                         AttentionBlock(
                             ch,
@@ -593,9 +617,13 @@ class UNetModel(nn.Module):
                     )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
+                # input_block_chans
                 input_block_chans.append(ch)
             if level != len(channel_mult) - 1:
+                # 最后一次不会下采样
+                # 因此2**3共8倍下采样
                 out_ch = ch
+                # resblock_updown=False , 因此这里就是直接Downsample
                 self.input_blocks.append(
                     TimestepEmbedSequential(
                         ResBlock(
@@ -615,6 +643,7 @@ class UNetModel(nn.Module):
                     )
                 )
                 ch = out_ch
+                # input_block_chans
                 input_block_chans.append(ch)
                 ds *= 2
                 self._feature_size += ch
@@ -624,9 +653,14 @@ class UNetModel(nn.Module):
         else:
             num_heads = ch // num_head_channels
             dim_head = num_head_channels
+        # legacy = False
         if legacy:
             #num_heads = 1
             dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
+        
+        # 这里开始中间层
+        # (ResBlock,SpatialTransformer,ResBlock)
+        # 中间层不改变通道数和大小
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -656,9 +690,13 @@ class UNetModel(nn.Module):
         )
         self._feature_size += ch
 
+        # 这里开始输出层
+        # 输出层直接连接Res前面的输入层相对应
+        # 等于整个网络有(z=4变320channel,3次下采样,1次中间层,3次上采样,320channel变z=4)
         self.output_blocks = nn.ModuleList([])
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
+                # unet skip connection
                 ich = input_block_chans.pop()
                 layers = [
                     ResBlock(
@@ -712,16 +750,20 @@ class UNetModel(nn.Module):
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
 
+        # 输出的时候，变成 z_channel = 4
         self.out = nn.Sequential(
             normalization(ch),
             nn.SiLU(),
             zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
         )
+
+        # 离散化表示
         if self.predict_codebook_ids:
             self.id_predictor = nn.Sequential(
             normalization(ch),
             conv_nd(dims, model_channels, n_embed, 1),
             #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
+            #这里，nn.LogSoftmax(dim=1) 在通道维度（即第二个维度，索引为1）上进行归一化，使得每个位置的所有通道值之和等于1（在对数空间中）。 
         )
 
     def convert_to_fp16(self):
@@ -749,32 +791,42 @@ class UNetModel(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
+        # x, timesteps, context就是输入进来的文字、图片之类的, y=None
+
         assert (y is not None) == (
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
         hs = []
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
+        # 根据正弦余弦将timesteps变成[N x dim]的t_emb编码
         emb = self.time_embed(t_emb)
 
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
+            # 如果需要编码class类的话
 
         h = x.type(self.dtype)
+        # input
         for module in self.input_blocks:
             h = module(h, emb, context)
             hs.append(h)
+        # middle
         h = self.middle_block(h, emb, context)
+        # output
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
+            # skip-connection
             h = module(h, emb, context)
         h = h.type(x.dtype)
         if self.predict_codebook_ids:
             return self.id_predictor(h)
         else:
+            # 输入的x与输出的h是同维度、同大小的
             return self.out(h)
 
 
+# 抽特征的网络，将 [B,C,H,W] 抽成 [batch_size, out_channel]
 class EncoderUNetModel(nn.Module):
     """
     The half UNet model with attention and timestep embedding.
@@ -929,6 +981,7 @@ class EncoderUNetModel(nn.Module):
                 zero_module(conv_nd(dims, ch, out_channels, 1)),
                 nn.Flatten(),
             )
+            # nn.Flatten 之后 (batch_size,-1)
         elif pool == "attention":
             assert num_head_channels != -1
             self.out = nn.Sequential(
@@ -975,6 +1028,10 @@ class EncoderUNetModel(nn.Module):
         :param timesteps: a 1-D batch of timesteps.
         :return: an [N x K] Tensor of outputs.
         """
+
+        # 通俗来说，将[N x C x ...]抽成一个[N x out_channels]的特征
+        # 有adaptiveAvg、attention、spatial几中抽法
+
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
 
         results = []
@@ -987,6 +1044,11 @@ class EncoderUNetModel(nn.Module):
         if self.pool.startswith("spatial"):
             results.append(h.type(x.dtype).mean(dim=(2, 3)))
             h = th.cat(results, axis=-1)
+            # th 就是 torch
+            # 因为spatial是把所有用到的通道（self._feature_size）的(h,w)都平均了
+            # 然后过一个MLP，输出的大小还是(N,outchannel,1,1)
+            # 也就是说：模型在每个输入模块（input_blocks）之后都会计算特征图的平均值
+            # 而不是仅在最后的输出之前进行池化
             return self.out(h)
         else:
             h = h.type(x.dtype)

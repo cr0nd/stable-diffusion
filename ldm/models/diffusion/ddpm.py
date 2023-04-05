@@ -85,6 +85,7 @@ class DDPM(pl.LightningModule):
         self.channels = channels
         self.use_positional_encodings = use_positional_encodings
         self.model = DiffusionWrapper(unet_config, conditioning_key)
+        # model = UNet
         count_params(self.model, verbose=True)
         self.use_ema = use_ema
         if self.use_ema:
@@ -95,12 +96,15 @@ class DDPM(pl.LightningModule):
         if self.use_scheduler:
             self.scheduler_config = scheduler_config
 
+        # 损失函数各项权重
         self.v_posterior = v_posterior
         self.original_elbo_weight = original_elbo_weight
         self.l_simple_weight = l_simple_weight
 
         if monitor is not None:
             self.monitor = monitor
+
+        # 保存点
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys, only_model=load_only_unet)
 
@@ -115,6 +119,8 @@ class DDPM(pl.LightningModule):
             self.logvar = nn.Parameter(self.logvar, requires_grad=True)
 
 
+    # 注册各种self.xxx
+    # 主要是beta、alpha的参数
     def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
                           linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
         if exists(given_betas):
@@ -169,6 +175,8 @@ class DDPM(pl.LightningModule):
         self.register_buffer('lvlb_weights', lvlb_weights, persistent=False)
         assert not torch.isnan(self.lvlb_weights).all()
 
+    # 在 Python 中，上下文管理器是一个用于管理资源（如文件、网络连接或锁等）的对象，
+    # 通常与 with 语句一起使用。上下文管理器可以确保在进入和退出上下文时执行特定的操作
     @contextmanager
     def ema_scope(self, context=None):
         if self.use_ema:
@@ -184,6 +192,7 @@ class DDPM(pl.LightningModule):
                 if context is not None:
                     print(f"{context}: Restored training weights")
 
+    # 载入权重
     def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
         sd = torch.load(path, map_location="cpu")
         if "state_dict" in list(sd.keys()):
@@ -194,6 +203,7 @@ class DDPM(pl.LightningModule):
                 if k.startswith(ik):
                     print("Deleting key {} from state_dict.".format(k))
                     del sd[k]
+        # 缺失、或不匹配
         missing, unexpected = self.load_state_dict(sd, strict=False) if not only_model else self.model.load_state_dict(
             sd, strict=False)
         print(f"Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys")
@@ -202,6 +212,7 @@ class DDPM(pl.LightningModule):
         if len(unexpected) > 0:
             print(f"Unexpected Keys: {unexpected}")
 
+    # A tuple (mean, variance, log_variance), all of x_start's shape
     def q_mean_variance(self, x_start, t):
         """
         Get the distribution q(x_t | x_0).
@@ -214,12 +225,14 @@ class DDPM(pl.LightningModule):
         log_variance = extract_into_tensor(self.log_one_minus_alphas_cumprod, t, x_start.shape)
         return mean, variance, log_variance
 
+    # 根据噪声和步数t，预测x_(t-1)
     def predict_start_from_noise(self, x_t, t, noise):
         return (
                 extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
                 extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
 
+    # 
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = (
                 extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start +
@@ -229,6 +242,7 @@ class DDPM(pl.LightningModule):
         posterior_log_variance_clipped = extract_into_tensor(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
+    # 预测x_t-1的均值、方差
     def p_mean_variance(self, x, t, clip_denoised: bool):
         model_out = self.model(x, t)
         if self.parameterization == "eps":
@@ -241,6 +255,7 @@ class DDPM(pl.LightningModule):
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance
 
+    # 采样出x_t-1图像
     @torch.no_grad()
     def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
         b, *_, device = *x.shape, x.device
@@ -250,6 +265,7 @@ class DDPM(pl.LightningModule):
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
+    # 循环采样
     @torch.no_grad()
     def p_sample_loop(self, shape, return_intermediates=False):
         device = self.betas.device
@@ -265,6 +281,8 @@ class DDPM(pl.LightningModule):
             return img, intermediates
         return img
 
+    # 采样一个批次
+    # seed是torch.randn(shape, device=device)
     @torch.no_grad()
     def sample(self, batch_size=16, return_intermediates=False):
         image_size = self.image_size
@@ -272,17 +290,21 @@ class DDPM(pl.LightningModule):
         return self.p_sample_loop((batch_size, channels, image_size, image_size),
                                   return_intermediates=return_intermediates)
 
+    # 前向过程
+    # 求x_t
     def q_sample(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
 
+    # 求mse_loss
     def get_loss(self, pred, target, mean=True):
         if self.loss_type == 'l1':
             loss = (target - pred).abs()
             if mean:
                 loss = loss.mean()
         elif self.loss_type == 'l2':
+            # 默认是l2
             if mean:
                 loss = torch.nn.functional.mse_loss(target, pred)
             else:
@@ -292,6 +314,7 @@ class DDPM(pl.LightningModule):
 
         return loss
 
+    # 
     def p_losses(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
@@ -310,23 +333,30 @@ class DDPM(pl.LightningModule):
         log_prefix = 'train' if self.training else 'val'
 
         loss_dict.update({f'{log_prefix}/loss_simple': loss.mean()})
+        # loss_simple
         loss_simple = loss.mean() * self.l_simple_weight
 
+        # loss_vlb
         loss_vlb = (self.lvlb_weights[t] * loss).mean()
         loss_dict.update({f'{log_prefix}/loss_vlb': loss_vlb})
 
+        # loss
         loss = loss_simple + self.original_elbo_weight * loss_vlb
 
         loss_dict.update({f'{log_prefix}/loss': loss})
 
         return loss, loss_dict
 
+    # 输入是图片x的tensor
+    # 返回值是loss
     def forward(self, x, *args, **kwargs):
         # b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
         # assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
         return self.p_losses(x, t, *args, **kwargs)
 
+    # 'b h w c -> b c h w'
+    # PIL格式 转 tensor
     def get_input(self, batch, k):
         x = batch[k]
         if len(x.shape) == 3:
@@ -335,11 +365,13 @@ class DDPM(pl.LightningModule):
         x = x.to(memory_format=torch.contiguous_format).float()
         return x
 
+    # 对所有batch，先转格式成tensor，然后forward
     def shared_step(self, batch):
         x = self.get_input(batch, self.first_stage_key)
         loss, loss_dict = self(x)
         return loss, loss_dict
 
+    # 训练循环
     def training_step(self, batch, batch_idx):
         loss, loss_dict = self.shared_step(batch)
 
@@ -364,10 +396,12 @@ class DDPM(pl.LightningModule):
         self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
         self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
 
+    # train_batch结束后，更新ema
     def on_train_batch_end(self, *args, **kwargs):
         if self.use_ema:
             self.model_ema(self.model)
 
+    # 将图片排列成一个gird
     def _get_rows_from_list(self, samples):
         n_imgs_per_row = len(samples)
         denoise_grid = rearrange(samples, 'n b c h w -> b n c h w')
@@ -375,6 +409,7 @@ class DDPM(pl.LightningModule):
         denoise_grid = make_grid(denoise_grid, nrow=n_imgs_per_row)
         return denoise_grid
 
+    # 
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=2, sample=True, return_keys=None, **kwargs):
         log = dict()
@@ -397,6 +432,7 @@ class DDPM(pl.LightningModule):
                 diffusion_row.append(x_noisy)
 
         log["diffusion_row"] = self._get_rows_from_list(diffusion_row)
+        # log前向过程的图片
 
         if sample:
             # get denoise row
@@ -404,15 +440,20 @@ class DDPM(pl.LightningModule):
                 samples, denoise_row = self.sample(batch_size=N, return_intermediates=True)
 
             log["samples"] = samples
+            # 去噪结果
             log["denoise_row"] = self._get_rows_from_list(denoise_row)
+            # 去噪中间过程
 
         if return_keys:
+            # log包含指定的keys
+            # 还是三个keys
             if np.intersect1d(list(log.keys()), return_keys).shape[0] == 0:
                 return log
             else:
                 return {key: log[key] for key in return_keys}
         return log
 
+    # pytorch-lightning optimizers
     def configure_optimizers(self):
         lr = self.learning_rate
         params = list(self.model.parameters())
@@ -1393,10 +1434,14 @@ class LatentDiffusion(DDPM):
         return x
 
 
+# 包装器
+# self.model = DiffusionWrapper(unet_config, conditioning_key)
+# 包装的是UNet结构
 class DiffusionWrapper(pl.LightningModule):
     def __init__(self, diff_model_config, conditioning_key):
         super().__init__()
         self.diffusion_model = instantiate_from_config(diff_model_config)
+        # 初始化diffusion_model的实例
         self.conditioning_key = conditioning_key
         assert self.conditioning_key in [None, 'concat', 'crossattn', 'hybrid', 'adm']
 
@@ -1404,16 +1449,21 @@ class DiffusionWrapper(pl.LightningModule):
         if self.conditioning_key is None:
             out = self.diffusion_model(x, t)
         elif self.conditioning_key == 'concat':
+            # 使用拼接（concatenation）策略。将输入图像和条件信息在通道维度（dim=1）上拼接。
             xc = torch.cat([x] + c_concat, dim=1)
             out = self.diffusion_model(xc, t)
         elif self.conditioning_key == 'crossattn':
+            # stable-diffusion使用该策略
+            # 使用交叉注意力（cross-attention）策略。将条件信息作为上下文（context）传递给模型。
             cc = torch.cat(c_crossattn, 1)
             out = self.diffusion_model(x, t, context=cc)
         elif self.conditioning_key == 'hybrid':
+            # 使用混合策略。同时使用拼接和交叉注意力策略。
             xc = torch.cat([x] + c_concat, dim=1)
             cc = torch.cat(c_crossattn, 1)
             out = self.diffusion_model(xc, t, context=cc)
         elif self.conditioning_key == 'adm':
+            # 使用另一种策略，将 c_crossattn[0] 作为 y 传递给模型。
             cc = c_crossattn[0]
             out = self.diffusion_model(x, t, y=cc)
         else:

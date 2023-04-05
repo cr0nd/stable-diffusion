@@ -111,6 +111,8 @@ class LinearAttention(nn.Module):
         # 每部分分别具有(batch_size, heads, channels, height * width)的形状。
         k = k.softmax(dim=-1)  
         context = torch.einsum('bhdn,bhen->bhde', k, v)
+        # 这里出来的context是 (b,heads,channel,channel)
+        # 每个channel的所有像素是它的dim
         out = torch.einsum('bhde,bhdn->bhen', context, q)
         out = rearrange(out, 'b heads c (h w) -> b (heads c) h w', heads=self.heads, h=h, w=w)
         return self.to_out(out)
@@ -156,6 +158,8 @@ class SpatialSelfAttention(nn.Module):
         q = rearrange(q, 'b c h w -> b (h w) c')
         k = rearrange(k, 'b c h w -> b c (h w)')
         w_ = torch.einsum('bij,bjk->bik', q, k)
+        # 这里出来的w是 (b,(h w),(h,w))
+        # 每个像素的channel是它的dim
 
         w_ = w_ * (int(c)**(-0.5))
         w_ = torch.nn.functional.softmax(w_, dim=2)
